@@ -2,8 +2,10 @@ import csv
 import json
 import logging
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException, Request
 import httpx
+import aiofiles
 from typing import List
 from pydantic import BaseModel
 
@@ -11,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-OPENAI_API_KEY = "openai_api_key"
+OPENAI_API_KEY = "api_key"
 CATEGORY_OPTIONS = [
     "Жалоба на блюдо",
     "Жалоба на просрочку на доставке",
@@ -43,17 +45,17 @@ class Review(BaseModel):
     problem_products: str = ""
     category_comment: str = ""
 
-
-def ensure_csv_exists():
+async def ensure_csv_exists():
+    """Асинхронно проверяет наличие CSV-файла и создаёт его при необходимости."""
     if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, mode='w', newline='', encoding='utf-8') as file:
-            writer = csv.writer(file)
-            writer.writerow(
-                ["date_create", "text_comment", "guests_id", "source_type", "shop_name", "source_description", "vote",
-                 "products", "problem_products", "category_comment"])
+        async with aiofiles.open(CSV_FILE, mode='w', encoding='utf-8', newline='') as file:
+            await file.write(
+                "date_create,text_comment,guests_id,source_type,shop_name,source_description,vote,products,problem_products,category_comment\n"
+            )
 
 
-async def analyze_text_with_openai(text: str) -> List[str]:
+async def analyze_text_with_openai(text: str):
+    """Асинхронный запрос к OpenAI с обработкой Rate Limit (429)."""
     if not text.strip():
         return ["Без категории"]
 
@@ -67,22 +69,38 @@ async def analyze_text_with_openai(text: str) -> List[str]:
         "model": "gpt-4o",
         "messages": [
             {"role": "system",
-             "content": "Ты эксперт по анализу отзывов. Тебе нужно выбрать одну или несколько категорий отзыва из списка, строго следуя значению текста."},
+             "content": "Ты эксперт по анализу отзывов. Выбери одну или несколько категорий отзыва из списка, строго следуя значению текста."},
             {"role": "user",
-             "content": f"Проанализируй текст отзыва и выбери одну или несколько наиболее подходящих категорий из списка: {', '.join(CATEGORY_OPTIONS)}. Если отзыв подходит под несколько категорий, укажи их все, разделяя запятой. Если ни одна из категорий не подходит, напиши 'Другое'. Ответ должен содержать только категории без дополнительных комментариев. \n\nТекст отзыва: {text}"}
+             "content": f"Проанализируй текст отзыва и выбери одну или несколько наиболее подходящих категорий из списка: {', '.join(CATEGORY_OPTIONS)}. Если отзыв подходит под несколько категорий, укажи их все, разделяя запятой. Ответ должен содержать только категории без дополнительных комментариев. \n\nТекст отзыва: {text}"}
         ],
         "max_tokens": 100
     }
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            data = response.json()
-            category_text = data.get("choices", [{}])[0].get("message", {}).get("content", "Другое").strip()
-            categories = [c.strip() for c in category_text.split(",") if c.strip() in CATEGORY_OPTIONS]
-            logging.info(f"OpenAI определил категории: {categories}")
-            return categories if categories else ["Другое"]
-        logging.error("Ошибка при запросе OpenAI: %s", response.text)
-        return ["Другое"]
+
+    retries = 3  # Количество попыток повторить запрос
+    for attempt in range(retries):
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+
+            if response.status_code == 200:
+                data = response.json()
+                category_text = data.get("choices", [{}])[0].get("message", {}).get("content", "Другое").strip()
+                categories = [c.strip() for c in category_text.split(",") if c.strip() in CATEGORY_OPTIONS]
+                logging.info(f"OpenAI определил категории: {categories}")
+                return categories if categories else ["Другое"]
+
+            elif response.status_code == 429:  # Rate limit exceeded
+                error_data = response.json()
+                wait_time = \
+                error_data.get("error", {}).get("message", "").split("Please try again in ")[-1].split("ms")[0]
+                wait_time = int(wait_time) / 1000 if wait_time.isdigit() else 2  # Фолбэк на 2 сек
+                logging.warning(f"Превышен лимит запросов! Жду {wait_time} сек...")
+                await asyncio.sleep(wait_time)
+            else:
+                logging.error(f"Ошибка при запросе OpenAI: {response.text}")
+                return ["Другое"]
+
+    logging.error("Превышено число попыток запроса к OpenAI.")
+    return ["Другое"]
 
 
 def extract_problem_product(text_comment: str, products: str) -> str:
@@ -100,33 +118,42 @@ def extract_problem_product(text_comment: str, products: str) -> str:
     return json.dumps(matched_products, ensure_ascii=False) if matched_products else "[]"
 
 
+async def process_review(review_data):
+    """Асинхронная обработка одного отзыва."""
+    if not review_data.get("text_comment", "").strip():
+        logging.warning("Пропущен пустой отзыв")
+        return None
+
+    review = Review(**review_data)
+    review.category_comment = ", ".join(await analyze_text_with_openai(review.text_comment))
+
+    if any(cat in review.category_comment for cat in ["Жалоба на блюдо", "Жалоба на просрочку в зале"]):
+        review.problem_products = extract_problem_product(review.text_comment, review.products)
+
+    return review
+
+
 @app.post("/analyze")
 async def analyze_reviews(request: Request):
+    """Асинхронный обработчик запросов анализа отзывов."""
     reviews = await request.json()
     if not isinstance(reviews, list):
         raise HTTPException(status_code=400, detail="Некорректный формат данных")
 
-    ensure_csv_exists()
-    processed_reviews = []
-    with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
+    await ensure_csv_exists()
 
-        for review_data in reviews:
-            if not review_data.get("text_comment", "").strip():
-                logging.warning("Пропущен пустой отзыв")
-                continue
+    # Обрабатываем все отзывы асинхронно
+    processed_reviews = await asyncio.gather(*[process_review(review) for review in reviews])
 
-            review = Review(**review_data)
-            review.category_comment = ", ".join(await analyze_text_with_openai(review.text_comment))
+    # Фильтруем пропущенные отзывы
+    processed_reviews = [review for review in processed_reviews if review is not None]
 
-            if any(cat in review.category_comment for cat in ["Жалоба на блюдо", "Жалоба на просрочку в зале"]):
-                review.problem_products = extract_problem_product(review.text_comment, review.products)
+    # Асинхронно записываем в CSV
+    async with aiofiles.open(CSV_FILE, mode='a', encoding='utf-8', newline='') as file:
+        for review in processed_reviews:
+            await file.write(
+                f"{review.date_create},{review.text_comment},{review.guests_id},{review.source_type},{review.shop_name},"
+                f"{review.source_description},{review.vote},{review.products},{review.problem_products},{review.category_comment}\n"
+            )
 
-            writer.writerow([
-                review.date_create, review.text_comment, review.guests_id, review.source_type, review.shop_name,
-                review.source_description, review.vote, review.products, review.problem_products,
-                review.category_comment
-            ])
-            processed_reviews.append(review.dict())
-
-    return {"status": "success", "processed_reviews": processed_reviews}
+    return {"status": "success", "processed_reviews": [review.dict() for review in processed_reviews]}
