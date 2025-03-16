@@ -29,6 +29,7 @@ CATEGORY_OPTIONS = [
 ]
 
 CSV_FILE = "reviews.csv"
+semaphore = asyncio.Semaphore(5)
 
 
 class Review(BaseModel):
@@ -49,125 +50,9 @@ async def ensure_csv_exists():
     if not os.path.exists(CSV_FILE):
         async with aiofiles.open(CSV_FILE, mode='w', encoding='utf-8', newline='') as file:
             await file.write(
-                "date_create;text_comment;guests_id;source_type;shop_name;source_description;vote;products;problem_products;category_comment\n"
+                "date_create;text_comment;guests_id;source_type;shop_name;source_description;vote;products"
+                ";problem_products;category_comment\n "
             )
-
-
-semaphore = asyncio.Semaphore(5)
-
-import json
-import logging
-import os
-import asyncio
-from fastapi import FastAPI, HTTPException, Request
-import httpx
-import aiofiles
-from pydantic import BaseModel
-from dotenv import load_dotenv
-
-# Загружаем переменные окружения
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-
-app = FastAPI()
-
-# Читаем API-ключ из переменных окружения
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("API-ключ OpenAI не найден! Укажите его в .env файле.")
-
-CATEGORY_OPTIONS = [
-    "Жалоба на блюдо", "Жалоба на просрочку на доставке", "Жалоба на просрочку в зале",
-    "Положительный отзыв", "Жалоба на долгую доставку", "Жалоба на то, что не дозвониться по телефону",
-    "Жалоба на опоздание доставки", "Жалоба на доставку", "Жалоба на кофе на доставку",
-    "Жалоба на пустые полки", "Жалоба на недовоз", "Жалоба на грубость продавцов",
-    "Жалоба на кофе в зале"
-]
-
-CSV_FILE = "reviews.csv"
-
-
-class Review(BaseModel):
-    date_create: str
-    text_comment: str
-    guests_id: int
-    source_type: int
-    shop_name: str
-    source_description: str
-    vote: int
-    products: str
-    problem_products: str = ""
-    category_comment: str = ""
-
-
-async def ensure_csv_exists():
-    """Асинхронно проверяет наличие CSV-файла и создаёт его при необходимости."""
-    if not os.path.exists(CSV_FILE):
-        async with aiofiles.open(CSV_FILE, mode='w', encoding='utf-8', newline='') as file:
-            await file.write(
-                "date_create;text_comment;guests_id;source_type;shop_name;source_description;vote;products;problem_products;category_comment\n"
-            )
-
-
-semaphore = asyncio.Semaphore(5)
-
-import json
-import logging
-import os
-import asyncio
-from fastapi import FastAPI, HTTPException, Request
-import httpx
-import aiofiles
-from pydantic import BaseModel
-from dotenv import load_dotenv
-
-# Загружаем переменные окружения
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-
-app = FastAPI()
-
-# Читаем API-ключ из переменных окружения
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("API-ключ OpenAI не найден! Укажите его в .env файле.")
-
-CATEGORY_OPTIONS = [
-    "Жалоба на блюдо", "Жалоба на просрочку на доставке", "Жалоба на просрочку в зале",
-    "Положительный отзыв", "Жалоба на долгую доставку", "Жалоба на то, что не дозвониться по телефону",
-    "Жалоба на опоздание доставки", "Жалоба на доставку", "Жалоба на кофе на доставку",
-    "Жалоба на пустые полки", "Жалоба на недовоз", "Жалоба на грубость продавцов",
-    "Жалоба на кофе в зале"
-]
-
-CSV_FILE = "reviews.csv"
-
-
-class Review(BaseModel):
-    date_create: str
-    text_comment: str
-    guests_id: int
-    source_type: int
-    shop_name: str
-    source_description: str
-    vote: int
-    products: str
-    problem_products: str = ""
-    category_comment: str = ""
-
-
-async def ensure_csv_exists():
-    """Асинхронно проверяет наличие CSV-файла и создаёт его при необходимости."""
-    if not os.path.exists(CSV_FILE):
-        async with aiofiles.open(CSV_FILE, mode='w', encoding='utf-8', newline='') as file:
-            await file.write(
-                "date_create;text_comment;guests_id;source_type;shop_name;source_description;vote;products;problem_products;category_comment\n"
-            )
-
-
-semaphore = asyncio.Semaphore(5)
 
 
 async def analyze_text_with_openai(text: str, prompt_type: str, products: str = None):
@@ -253,6 +138,7 @@ async def process_review(review_data):
         review.problem_products = json.dumps(problem_products, ensure_ascii=False) if problem_products else "[]"
 
     return review
+
 
 async def write_reviews_to_csv(reviews):
     """Запись отзывов в CSV."""
