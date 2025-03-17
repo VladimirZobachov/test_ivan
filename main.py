@@ -142,7 +142,7 @@ async def process_review(review_data):
 
 async def write_reviews_to_csv(reviews):
     """Запись отзывов в CSV."""
-    async with aiofiles.open(CSV_FILE, mode='a', encoding='utf-8', newline='') as file:
+    async with aiofiles.open(CSV_FILE, mode='a', encoding='UTF-8-sig', newline='') as file:
         for review in reviews:
             if review:
                 row = [
